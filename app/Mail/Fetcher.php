@@ -14,9 +14,13 @@ use TempMail\Repo\MessageRepository;
 /**
  * Mengambil email baru dari mailbox catch-all dan menyimpannya ke database.
  *
- * Alamat tujuan ditentukan dari header Delivered-To (paling akurat untuk
- * catch-all), lalu X-Original-To, lalu To. Pesan untuk alamat yang tidak
- * terdaftar dibuang — tanpa ini, spam ke alamat acak akan memenuhi database.
+ * Alamat tujuan ditentukan dari header envelope (Envelope-to, X-Original-To),
+ * bukan Delivered-To: saat catch-all meneruskan pesan ke satu mailbox,
+ * Delivered-To berisi alamat mailbox, bukan alamat acak yang dituju user.
+ *
+ * Pesan untuk alamat yang tidak terdaftar tidak disimpan. Dengan
+ * imap.delete_after_fetch yang hanya menghapus pesan sukses, pesan yang
+ * tidak dikenali tetap di server dan bisa diperiksa ulang.
  */
 final class Fetcher
 {
@@ -60,6 +64,7 @@ final class Fetcher
 
         $parser = new MimeParser();
         $deleteAfterFetch = Config::bool('imap.delete_after_fetch', true);
+        $deleteUnmatched = Config::bool('imap.delete_unmatched', false);
         $batchSize = max(1, Config::int('imap.batch_size', 25));
 
         try {
@@ -70,39 +75,87 @@ final class Fetcher
             $lastUid = $this->lastUid();
             $uids = array_slice($client->searchUidsGreaterThan($lastUid), 0, $batchSize);
 
+            $purgedAnything = false;
+
             foreach ($uids as $uid) {
                 $this->stats['fetched']++;
                 $raw = $client->fetchRaw($uid);
 
                 if ($raw === null || $raw === '') {
+                    // Satu pesan gagal diambil tidak boleh memblokir seluruh
+                    // antrean, jadi UID tetap dimajukan. Pesannya sendiri
+                    // tidak dihapus dari server dan dicatat di log.
                     $this->stats['failed']++;
+                    Logger::error('UID ' . $uid . ' gagal diambil dari server, dilewati');
+                    $this->saveLastUid($uid);
                     continue;
                 }
 
+                $stored = false;
+                $unmatched = false;
+                $duplicate = false;
+
                 try {
                     $parsed = $parser->parse($raw);
-                    $recipient = self::recipient($parsed);
+                    $recipient = $this->matchInbox($parsed);
 
-                    if ($recipient === null || !$this->inboxes->exists($recipient)) {
+                    if ($recipient === null) {
                         $this->stats['skipped']++;
-                    } elseif ($this->persist($parsed, $recipient)) {
-                        $this->stats['stored']++;
+                        $unmatched = true;
+                        Logger::info(sprintf(
+                            'UID %d dilewati: tidak ada alamat terdaftar. dari=%s subjek=%s kandidat=[%s]',
+                            $uid,
+                            $parsed->fromAddr !== '' ? $parsed->fromAddr : '?',
+                            $parsed->subject,
+                            implode(', ', self::recipientCandidates($parsed))
+                        ));
                     } else {
-                        $this->stats['skipped']++;
+                        $outcome = $this->persist($parsed, $recipient);
+
+                        if ($outcome === 'stored') {
+                            $this->stats['stored']++;
+                            $stored = true;
+                        } else {
+                            $this->stats['skipped']++;
+                            // Duplikat berarti isinya sudah ada di database,
+                            // jadi aman dihapus dari mailbox.
+                            $duplicate = $outcome === 'duplicate';
+
+                            if (!$duplicate) {
+                                Logger::error(sprintf(
+                                    'UID %d gagal disimpan untuk %s (insert ditolak)',
+                                    $uid,
+                                    $recipient
+                                ));
+                            }
+                        }
                     }
                 } catch (\Throwable $e) {
                     $this->stats['failed']++;
                     Logger::error('Gagal memproses UID ' . $uid . ': ' . $e->getMessage());
                 }
 
-                if ($deleteAfterFetch) {
+                // Pesan hanya dihapus dari server bila isinya sudah ada di
+                // database (tersimpan atau duplikat). Pesan yang tidak bisa
+                // dikenali tetap tinggal di mailbox supaya bisa diperiksa bila
+                // ada bug pembacaan header, tapi UID tetap dimajukan agar
+                // tidak diproses ulang terus dan tidak menghalangi pesan baru.
+                //
+                // imap.delete_unmatched bisa dinyalakan setelah pipeline
+                // terbukti stabil, untuk mencegah mailbox penuh spam.
+                $deletable = $stored
+                    || $duplicate
+                    || ($unmatched && $deleteUnmatched);
+
+                if ($deleteAfterFetch && $deletable) {
                     $client->markDeleted($uid);
+                    $purgedAnything = true;
                 }
 
                 $this->saveLastUid($uid);
             }
 
-            if ($deleteAfterFetch && $uids !== []) {
+            if ($deleteAfterFetch && $purgedAnything) {
                 $client->expunge();
             }
 
@@ -119,45 +172,110 @@ final class Fetcher
         return $this->stats;
     }
 
-    /** Menentukan alamat tujuan pesan. */
-    public static function recipient(ParsedMessage $message): ?string
+    /**
+     * Kandidat alamat tujuan, diurutkan dari yang paling akurat.
+     *
+     * Urutan ini penting. Saat catch-all meneruskan pesan ke satu mailbox,
+     * Exim menulis alamat mailbox tujuan di header Delivered-To:
+     *
+     *   Delivered-To:  tempemail@domain   <- mailbox, bukan alamat acak
+     *   Envelope-to:   abc123@domain      <- alamat asli
+     *   To:            abc123@domain
+     *
+     * Kalau Delivered-To didahulukan, semua pesan dianggap milik mailbox
+     * catch-all, tidak cocok dengan alamat terdaftar, lalu tidak tersimpan.
+     *
+     * @return list<string>
+     */
+    public static function recipientCandidates(ParsedMessage $message): array
     {
-        $candidates = [
-            $message->header('delivered-to'),
-            $message->header('x-original-to'),
+        $headers = [
             $message->header('envelope-to'),
-            $message->toAddr !== '' ? $message->toAddr : $message->header('to'),
+            $message->header('x-envelope-to'),
+            $message->header('x-original-to'),
+            $message->header('delivered-to'),
+            $message->header('to'),
+            $message->toAddr,
+            $message->header('cc'),
         ];
 
-        foreach ($candidates as $candidate) {
-            if ($candidate === '') {
+        $candidates = [];
+
+        foreach ($headers as $header) {
+            if ($header === '') {
                 continue;
             }
 
-            if (preg_match_all('/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/i', $candidate, $matches)) {
-                foreach ($matches[0] as $email) {
-                    $normalized = Address::normalize($email);
+            if (!preg_match_all('/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/i', $header, $matches)) {
+                continue;
+            }
 
-                    if ($normalized !== null) {
-                        return $normalized;
-                    }
+            foreach ($matches[0] as $email) {
+                $normalized = Address::normalize($email);
+
+                if ($normalized !== null && !in_array($normalized, $candidates, true)) {
+                    $candidates[] = $normalized;
                 }
+            }
+        }
+
+        // Alamat catch-all adalah mailbox penerima, bukan alamat yang dibuat
+        // user. Buang selama masih ada kandidat lain.
+        $catchall = Address::normalize(Config::string('imap.user'));
+
+        if ($catchall !== null && count($candidates) > 1) {
+            $filtered = array_values(array_filter(
+                $candidates,
+                static fn (string $candidate): bool => $candidate !== $catchall
+            ));
+
+            if ($filtered !== []) {
+                $candidates = $filtered;
+            }
+        }
+
+        return $candidates;
+    }
+
+    /**
+     * Alamat tujuan pertama yang valid, tanpa melihat isi database.
+     * Untuk pencocokan ke database gunakan recipientCandidates().
+     */
+    public static function recipient(ParsedMessage $message): ?string
+    {
+        return self::recipientCandidates($message)[0] ?? null;
+    }
+
+    /**
+     * Kandidat pertama yang benar-benar terdaftar di tabel inboxes.
+     * Ini yang mencegah pesan multi-penerima masuk ke alamat yang salah.
+     */
+    public function matchInbox(ParsedMessage $message): ?string
+    {
+        foreach (self::recipientCandidates($message) as $candidate) {
+            if ($this->inboxes->exists($candidate)) {
+                return $candidate;
             }
         }
 
         return null;
     }
 
-    private function persist(ParsedMessage $message, string $address): bool
+    /**
+     * Menyimpan satu pesan.
+     *
+     * @return 'stored'|'duplicate'|'failed' hasil penyimpanan
+     */
+    private function persist(ParsedMessage $message, string $address): string
     {
         $localPart = Address::localPartOf($address);
 
         if ($localPart === null) {
-            return false;
+            return 'failed';
         }
 
-        // Alamat yang dikirimi email tapi belum terdaftar (misalnya user
-        // mengetik alamat lama setelah emailnya datang) tetap dicatat.
+        // Alamat sudah dipastikan ada oleh matchInbox(); ensure() hanya
+        // berjaga bila barisnya terhapus di antara dua query.
         $this->inboxes->ensure($address, $localPart, inet_pton('0.0.0.0') ?: '');
 
         $bodyText = $message->text;
@@ -172,7 +290,7 @@ final class Fetcher
         $messageKey = hash('sha256', $address . '|' . $message->fromAddr . '|' . $message->subject . '|' . $message->timestamp . '|' . $message->size);
 
         if ($this->messages->messageKeyExists($messageKey)) {
-            return false;
+            return 'duplicate';
         }
 
         $storedAttachments = [];
@@ -207,7 +325,7 @@ final class Fetcher
                 $store->delete($attachment['stored_name']);
             }
 
-            return false;
+            return 'failed';
         }
 
         $trimmed = $this->messages->trimToLimit($address, Config::int('inbox.max_messages_per_inbox', 100));
@@ -216,7 +334,7 @@ final class Fetcher
             $store->delete($storedName);
         }
 
-        return true;
+        return 'stored';
     }
     private function lastUid(): int
     {

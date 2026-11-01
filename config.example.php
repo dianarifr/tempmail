@@ -32,8 +32,13 @@ return [
         'pass'       => '',
         'mailbox'    => 'INBOX',
         'timeout'    => 30,
-        // Pesan dihapus dari server setelah berhasil diambil, supaya kuota mailbox tidak penuh.
+        // Pesan dihapus dari server hanya setelah berhasil disimpan, supaya
+        // kuota mailbox tidak penuh tapi pesan yang gagal dibaca tidak hilang.
         'delete_after_fetch' => true,
+        // Hapus juga pesan yang tidak cocok dengan alamat terdaftar.
+        // Biarkan false saat deploy pertama supaya pesan yang gagal dikenali
+        // bisa diperiksa di webmail. Nyalakan setelah pipeline terbukti stabil.
+        'delete_unmatched' => false,
         // Jumlah maksimal pesan yang diproses per satu kali cron berjalan.
         'batch_size' => 25,
     ],

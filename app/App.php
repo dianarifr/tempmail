@@ -13,11 +13,11 @@ use TempMail\Mail\Logger;
  */
 final class App
 {
-    public static function boot(): void
+    public static function boot(?string $configPath = null): void
     {
         self::registerAutoloader();
 
-        Config::load(dirname(__DIR__) . '/config.php');
+        Config::load($configPath ?? dirname(__DIR__) . '/config.php');
 
         date_default_timezone_set(Config::string('app.timezone', 'Asia/Jakarta'));
         mb_internal_encoding('UTF-8');

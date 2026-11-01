@@ -138,9 +138,6 @@ final class ImapClient
             return null;
         }
 
-        // Buang penanda literal yang ditambahkan protokol.
-        $prefix = 'UID FETCH ' . $uid;
-
         return $raw;
     }
 

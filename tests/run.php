@@ -6,13 +6,16 @@ declare(strict_types=1);
  * Test manual tanpa PHPUnit, dijalankan dari CLI:
  *   php tests/run.php
  *
- * Bagian 1 (parser, sanitizer, alamat) tidak butuh database.
- * Bagian 2 (simpan pesan) butuh koneksi DB yang sudah diisi lewat config.php.
+ * Memakai tests/config.test.php, bukan config.php, supaya tidak pernah
+ * menyentuh database atau domain produksi.
+ *
+ * Bagian database hanya berjalan bila TEMPMAIL_TEST_DB di-set:
+ *   TEMPMAIL_TEST_DB=tempmail_test php tests/run.php
  */
 
 require dirname(__DIR__) . '/app/App.php';
 
-\TempMail\App::boot();
+\TempMail\App::boot(dirname(__FILE__) . '/config.test.php');
 
 use TempMail\Inbox\Address;
 use TempMail\Mail\MimeParser;
@@ -149,7 +152,7 @@ echo "\n[5] Deteksi penerima\n";
 $delivered = new \TempMail\Mail\ParsedMessage();
 $delivered->headers['delivered-to'] = 'abc@tempmail.test';
 check(
-    'delivered-to dipakai lebih dulu',
+    'delivered-to dipakai bila tidak ada header lain',
     \TempMail\Mail\Fetcher::recipient($delivered) === 'abc@tempmail.test'
 );
 
@@ -157,7 +160,7 @@ $spoofed = new \TempMail\Mail\ParsedMessage();
 $spoofed->headers['delivered-to'] = 'abc@tempmail.test';
 $spoofed->headers['to'] = 'ceo@tempmail.test';
 check(
-    'to tidak menimpa delivered-to',
+    'delivered-to menang atas to',
     \TempMail\Mail\Fetcher::recipient($spoofed) === 'abc@tempmail.test'
 );
 
@@ -165,9 +168,44 @@ $foreign = new \TempMail\Mail\ParsedMessage();
 $foreign->headers['delivered-to'] = 'orang@example.com';
 check('alamat domain lain ditolak', \TempMail\Mail\Fetcher::recipient($foreign) === null);
 
+// Kasus nyata dari catch-all Exim di shared hosting: Delivered-To berisi
+// alamat mailbox, sedangkan alamat asli ada di Envelope-to / To.
+$catchall = new \TempMail\Mail\ParsedMessage();
+$catchall->headers['delivered-to'] = 'tempemail@tempmail.test';
+$catchall->headers['envelope-to'] = 'hnts3atmcb@tempmail.test';
+$catchall->headers['to'] = 'hnts3atmcb@tempmail.test';
+check(
+    'envelope-to menang atas delivered-to (kasus catch-all)',
+    \TempMail\Mail\Fetcher::recipient($catchall) === 'hnts3atmcb@tempmail.test',
+    (string) \TempMail\Mail\Fetcher::recipient($catchall)
+);
+
+check(
+    'alamat catch-all dibuang dari kandidat',
+    !in_array('tempemail@tempmail.test', \TempMail\Mail\Fetcher::recipientCandidates($catchall), true),
+    implode(', ', \TempMail\Mail\Fetcher::recipientCandidates($catchall))
+);
+
+$multi = new \TempMail\Mail\ParsedMessage();
+$multi->headers['to'] = 'satu@tempmail.test, dua@tempmail.test';
+check(
+    'beberapa penerima terdeteksi',
+    count(\TempMail\Mail\Fetcher::recipientCandidates($multi)) === 2
+);
+
+$onlyCatchall = new \TempMail\Mail\ParsedMessage();
+$onlyCatchall->headers['delivered-to'] = 'tempemail@tempmail.test';
+check(
+    'catch-all tetap dipakai bila satu-satunya kandidat',
+    \TempMail\Mail\Fetcher::recipient($onlyCatchall) === 'tempemail@tempmail.test'
+);
+
 echo "\n[6] Simpan ke database\n";
 
-try {
+if (getenv('TEMPMAIL_TEST_DB') === false) {
+    echo "  SKIP set TEMPMAIL_TEST_DB untuk menjalankan bagian ini\n";
+} else {
+    try {
     $repo = new \TempMail\Repo\MessageRepository();
     $inboxes = new \TempMail\Repo\InboxRepository();
 
@@ -210,8 +248,9 @@ try {
     check('hapus pesan', $deleted === true);
     check('hapus pesan alamat lain gagal', $repo->delete(999999, $address) === false);
     check('daftar kosong setelah hapus', $repo->countForAddress($address) === 0);
-} catch (Throwable $e) {
-    echo '  SKIP bagian database: ' . $e->getMessage() . "\n";
+    } catch (Throwable $e) {
+        echo '  SKIP bagian database: ' . $e->getMessage() . "\n";
+    }
 }
 
 echo "\n" . str_repeat('-', 46) . "\n";
