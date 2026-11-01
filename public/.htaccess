@@ -1,0 +1,16 @@
+# Cache aset statis; HTML tetap no-store.
+<IfModule mod_headers.c>
+    <FilesMatch "\.(css|js)$">
+        Header set Cache-Control "public, max-age=86400"
+    </FilesMatch>
+    <FilesMatch "\.php$">
+        Header set Cache-Control "no-store, max-age=0"
+    </FilesMatch>
+</IfModule>
+
+Options -Indexes
+
+# Blokir akses langsung ke bootstrap.
+<Files "_bootstrap.php">
+    Require all denied
+</Files>

@@ -1,0 +1,13 @@
+# Lindungi file konfigurasi bila document root salah diarahkan ke folder root aplikasi.
+<FilesMatch "^(config\.php|config\.example\.php)$">
+    Require all denied
+</FilesMatch>
+
+# Folder internal tidak boleh diakses langsung.
+RedirectMatch 404 ^/(app|bin|sql|storage|tests)(/|$)
+
+Options -Indexes
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+</IfModule>

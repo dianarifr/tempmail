@@ -1,0 +1,36 @@
+# Kredensial. Jangan pernah ikut ke repo.
+# Yang di-commit hanya config.example.php.
+/config.php
+
+# Data runtime
+/storage/attachments/*
+!/storage/attachments/.gitkeep
+/storage/logs/*
+!/storage/logs/.gitkeep
+/storage/poll.lock
+/storage/*.lock
+
+# Log dan arsip
+*.log
+*.zip
+*.tar.gz
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Dependency, kalau nanti ditambahkan
+/vendor/
+/node_modules/
+composer.lock
+package-lock.json
+
+# File sementara
+*.tmp
+*.bak
+.php-cs-fixer.cache
+tests/.phpunit.result.cache
