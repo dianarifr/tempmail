@@ -17,7 +17,11 @@ final class App
     {
         self::registerAutoloader();
 
-        Config::load($configPath ?? dirname(__DIR__) . '/config.php');
+        // TEMPMAIL_CONFIG hanya dipakai oleh test dan perkakas CLI, supaya
+        // jalur pipe bisa diuji tanpa menyentuh config.php produksi.
+        $configPath ??= getenv('TEMPMAIL_CONFIG') ?: dirname(__DIR__) . '/config.php';
+
+        Config::load($configPath);
 
         date_default_timezone_set(Config::string('app.timezone', 'Asia/Jakarta'));
         mb_internal_encoding('UTF-8');

@@ -61,5 +61,6 @@ return [
     'storage' => [
         'attachments' => sys_get_temp_dir() . '/tempmail-test/attachments',
         'logs'        => sys_get_temp_dir() . '/tempmail-test/logs',
+        'queue'       => sys_get_temp_dir() . '/tempmail-test/queue',
     ],
 ];

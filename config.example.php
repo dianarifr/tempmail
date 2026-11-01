@@ -70,5 +70,7 @@ return [
     'storage' => [
         'attachments' => dirname(__FILE__) . '/storage/attachments',
         'logs'        => dirname(__FILE__) . '/storage/logs',
+        // Antrean email dari jalur pipe yang belum berhasil disimpan.
+        'queue'       => dirname(__FILE__) . '/storage/queue',
     ],
 ];

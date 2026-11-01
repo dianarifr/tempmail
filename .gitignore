@@ -7,6 +7,8 @@
 !/storage/attachments/.gitkeep
 /storage/logs/*
 !/storage/logs/.gitkeep
+/storage/queue/*
+!/storage/queue/.gitkeep
 /storage/poll.lock
 /storage/*.lock
 
