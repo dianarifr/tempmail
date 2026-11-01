@@ -32,6 +32,13 @@ final class IngestQueue
 
     public function __construct(private readonly string $directory)
     {
+        // Direktori kosong berarti config.php belum punya key storage.queue
+        // (misalnya setelah upgrade). Tanpa pemeriksaan ini, mkdir('') gagal
+        // dengan "Invalid path" dan antrean tidak pernah aktif.
+        if (trim($this->directory) === '') {
+            throw new RuntimeException('Konfigurasi storage.queue belum diisi.');
+        }
+
         if (!is_dir($this->directory) && !mkdir($this->directory, 0750, true) && !is_dir($this->directory)) {
             throw new RuntimeException('Tidak bisa membuat direktori antrean: ' . $this->directory);
         }
@@ -39,7 +46,32 @@ final class IngestQueue
 
     public static function fromConfig(): self
     {
-        return new self(Config::string('storage.queue'));
+        return new self(self::resolveDirectory());
+    }
+
+    /**
+     * Menentukan direktori antrean.
+     *
+     * Nilai storage.queue dipakai bila ada. Kalau tidak, dipakai
+     * storage/logs/../queue sehingga lokasinya tetap di dalam folder
+     * storage milik aplikasi, bukan di tempat lain.
+     */
+    private static function resolveDirectory(): string
+    {
+        $configured = Config::string('storage.queue');
+
+        if (trim($configured) !== '') {
+            return $configured;
+        }
+
+        // Sejajarkan dengan folder logs: <storage>/logs → <storage>/queue.
+        $logs = Config::string('storage.logs');
+
+        if (trim($logs) !== '') {
+            return dirname(rtrim($logs, '/')) . '/queue';
+        }
+
+        return dirname(__DIR__, 2) . '/storage/queue';
     }
 
     /**

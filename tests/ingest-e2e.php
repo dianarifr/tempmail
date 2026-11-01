@@ -333,6 +333,41 @@ try {
     echo '  FAIL error: ' . get_class($e) . ' — ' . $e->getMessage() . "\n";
 }
 
+echo "\n[Antrean: config tanpa storage.queue]\n";
+
+try {
+    // Server yang baru di-upgrade belum punya key storage.queue. Dulu ini
+    // menghasilkan mkdir('') dan antrean mati tanpa email tersimpan.
+    $reflection = new ReflectionClass(Config::class);
+    $values = $reflection->getProperty('values');
+    $values->setAccessible(true);
+    $current = $values->getValue();
+
+    $savedQueue = $current['storage']['queue'] ?? null;
+    unset($current['storage']['queue']);
+    $values->setValue(null, $current);
+
+    $queue = IngestQueue::fromConfig();
+    $directory = (new ReflectionClass($queue))->getProperty('directory');
+    $directory->setAccessible(true);
+    $resolved = $directory->getValue($queue);
+
+    check('direktori antrean tetap ditentukan', $resolved !== '', (string) $resolved);
+    check(
+        'direktori antrean sejajar dengan folder logs',
+        dirname($resolved) === dirname(Config::string('storage.logs')),
+        (string) $resolved
+    );
+    check('direktori antrean benar-benar dibuat', is_dir($resolved), (string) $resolved);
+
+    // Kembalikan konfigurasi seperti semula.
+    $current['storage']['queue'] = $savedQueue;
+    $values->setValue(null, $current);
+} catch (Throwable $e) {
+    $failed++;
+    echo '  FAIL error: ' . get_class($e) . ' — ' . $e->getMessage() . "\n";
+}
+
 echo "\n" . str_repeat('-', 46) . "\n";
 echo "lulus: {$passed}   gagal: {$failed}\n\n";
 
